@@ -11,6 +11,7 @@ include(cmake/dependencies.cmake)
 add_library(foxglove
   src/error.cpp
   src/protocol.cpp
+  src/channel.cpp
 )
 target_include_directories(foxglove PUBLIC include)
 target_link_libraries(foxglove PUBLIC tl::expected nlohmann_json::nlohmann_json)
@@ -22,3 +23,4 @@ add_subdirectory(tests)
 # Examples
 add_subdirectory(examples/ch01_skeleton)
 add_subdirectory(examples/ch02_protocol)
+add_subdirectory(examples/ch03_channel)
