@@ -1,0 +1,2 @@
+add_executable(ch05_serialization main.cpp)
+target_link_libraries(ch05_serialization PRIVATE foxglove)

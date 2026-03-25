@@ -13,3 +13,8 @@ add_test(NAME test_channel COMMAND test_channel)
 add_executable(test_server test_server.cpp)
 target_link_libraries(test_server PRIVATE foxglove Catch2::Catch2WithMain)
 add_test(NAME test_server COMMAND test_server)
+
+add_executable(test_messages test_messages.cpp)
+target_link_libraries(test_messages PRIVATE foxglove Catch2::Catch2WithMain)
+target_compile_definitions(test_messages PRIVATE FOXGLOVE_TEST_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
+add_test(NAME test_messages COMMAND test_messages)
