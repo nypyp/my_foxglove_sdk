@@ -18,3 +18,7 @@ add_executable(test_messages test_messages.cpp)
 target_link_libraries(test_messages PRIVATE foxglove Catch2::Catch2WithMain)
 target_compile_definitions(test_messages PRIVATE FOXGLOVE_TEST_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
 add_test(NAME test_messages COMMAND test_messages)
+
+add_executable(test_context test_context.cpp)
+target_link_libraries(test_context PRIVATE foxglove Catch2::Catch2WithMain)
+add_test(NAME test_context COMMAND test_context)
