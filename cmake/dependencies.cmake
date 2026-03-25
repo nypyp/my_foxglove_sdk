@@ -12,7 +12,13 @@ FetchContent_Declare(
   GIT_TAG        v3.5.2
 )
 
+FetchContent_Declare(
+  nlohmann_json
+  GIT_REPOSITORY https://github.com/nlohmann/json.git
+  GIT_TAG        v3.11.3
+)
+
 # Disable tl-expected tests to avoid Catch2 version conflict
 set(EXPECTED_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 
-FetchContent_MakeAvailable(tl-expected Catch2)
+FetchContent_MakeAvailable(tl-expected Catch2 nlohmann_json)
