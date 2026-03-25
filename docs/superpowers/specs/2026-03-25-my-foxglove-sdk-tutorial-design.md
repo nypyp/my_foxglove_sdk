@@ -1,7 +1,7 @@
 # Design Spec: my_foxglove_sdk — A From-Scratch C++ Foxglove SDK Tutorial
 
 **Date**: 2026-03-25
-**Status**: Draft
+**Status**: Reviewed (Oracle review incorporated)
 **Approach**: Protocol-first, bottom-up (方案 A)
 
 ---
@@ -16,7 +16,7 @@ Build an educational C++ project that teaches how to construct a Foxglove SDK fr
 2. Each chapter (git tag) compiles, runs, and passes its own tests
 3. The final product connects to Foxglove Studio and displays live 3D visualization data
 4. Code strictly follows conventions extracted from the official foxglove-sdk source code
-5. Every design decision is explicitly compared against the official implementation in `third-party/foxglove-sdk/`
+5. Each chapter's public API surface and major architecture choices are compared against the official implementation in `third-party/foxglove-sdk/`
 
 ### Non-Goals
 
@@ -241,7 +241,7 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
 
 **Official comparison**: `rust/foxglove/src/websocket/protocol.rs` (Rust core), cross-reference with [ws-protocol spec](https://github.com/foxglove/ws-protocol/blob/main/docs/spec.md)
 
-**Milestone**: All protocol message types encode/decode correctly with 100% roundtrip fidelity.
+**Milestone**: All protocol message types encode/decode correctly: `encode(msg) → bytes → decode(bytes) → msg2`, where `msg == msg2` for all fields. Malformed input tests verify graceful error returns (not crashes).
 
 ---
 
@@ -249,27 +249,34 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
 **Tag**: `v0.3-channel`
 **New files**: `schema.hpp`, `channel.hpp/cpp`, `test_channel.cpp`, `examples/ch03_channel/`
 
+**Architecture note**: In this chapter, `RawChannel` is a standalone data holder with a callback-based output. It does NOT know about servers or sinks. The `MessageCallback` function type is the sole output mechanism. This avoids circular dependencies — the server (Ch4) and context (Ch6) will each provide their own callback implementations.
+
 **Content**:
 1. `Schema` structure:
    - `name`: schema identifier (e.g., `"foxglove.SceneUpdate"`)
-   - `encoding`: `"jsonschema"` or `"protobuf"`
-   - `data`: raw schema bytes
+   - `encoding`: `"jsonschema"` (this tutorial uses JSON serialization throughout; see Serialization Decision below)
+   - `data`: raw schema bytes (JSON Schema document)
 2. `ChannelDescriptor`:
    - `topic`: unique topic string
    - `schema`: Schema reference
-   - `encoding`: message encoding format
-3. `RawChannel` lifecycle:
-   - `static FoxgloveResult<RawChannel> create(topic, encoding, schema)` — factory
-   - `void log(const uint8_t* data, size_t len, uint64_t log_time)` — publish message
-   - `void close()` — unadvertise and clean up
+   - `encoding`: message encoding format (always `"json"` in this tutorial)
+3. `MessageCallback`: `std::function<void(channel_id, const uint8_t* data, size_t len, uint64_t log_time)>`
+4. `RawChannel` lifecycle:
+   - `static FoxgloveResult<RawChannel> create(topic, encoding, schema, MessageCallback)` — factory
+   - `void log(const uint8_t* data, size_t len, uint64_t log_time)` — invokes callback
+   - `void close()` — marks channel closed, rejects further `log()` calls
    - Atomic `channel_id` allocation (global counter)
    - Thread-safe `log()` via internal mutex
-4. Channel ID uniqueness guarantee
-5. Tests: create/close lifecycle, concurrent log from multiple threads, ID uniqueness across instances
+5. Concurrency contract:
+   - `log()` may be called from any thread; internally serialized via mutex
+   - `close()` blocks until in-flight `log()` calls complete; subsequent `log()` calls return immediately (no-op)
+   - Message ordering: messages from the same thread are delivered in call order; cross-thread ordering is not guaranteed
+6. Channel ID uniqueness guarantee (atomic global counter)
+7. Tests: create/close lifecycle, concurrent log from multiple threads, ID uniqueness, close-during-log race
 
 **Official comparison**: `cpp/foxglove/include/foxglove/channel.hpp`
 
-**Milestone**: Channels can be created, log data, and close safely from multiple threads.
+**Milestone**: Channels can be created, log data via callback, and close safely from multiple threads.
 
 ---
 
@@ -277,6 +284,8 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
 **Tag**: `v0.4-server`
 **New files**: `server.hpp/cpp`, `test_server.cpp`, `examples/ch04_server/`
 **Dependencies introduced**: libwebsockets
+
+**Architecture note**: The server explicitly manages channel registration. Users call `server.add_channel(channel)` to advertise and `server.remove_channel(channel_id)` to unadvertise. There is no auto-wiring — the server provides a `MessageCallback` that channels can use to push data.
 
 **Content**:
 1. libwebsockets integration:
@@ -286,32 +295,41 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
 2. `WebSocketServerOptions`:
    - `host`, `port` (default: `127.0.0.1:8765`)
    - `name` (server name for `serverInfo`)
-   - `capabilities` bitmask
+   - `capabilities` bitmask (in-scope values listed in Appendix A)
 3. `WebSocketServer` class:
    - `static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions)`
    - Internal event loop thread (runs libwebsockets service loop)
-   - Channel registration: when `RawChannel::create()` is called, auto-advertise to connected clients
+   - `add_channel(RawChannel&)` — advertise to connected clients, wire channel's callback to server dispatch
+   - `remove_channel(channel_id)` — unadvertise
    - Subscription tracking: map `subscriptionId → channelId → client`
-   - Message dispatch: `RawChannel::log()` → find subscribers → binary frame → send
+   - Message dispatch: channel callback → find subscribers → binary frame → send
 4. `WebSocketServerCallbacks`:
    - `on_subscribe(channel_id, client_id)`
    - `on_unsubscribe(channel_id, client_id)`
-5. Connection management: client connect/disconnect handling, graceful shutdown
-6. Tests:
-   - Mock WebSocket client connects, receives `serverInfo`
-   - Advertise channel → client sees advertisement
-   - Subscribe → send messageData → client receives correct binary frame
+5. Concurrency contract:
+   - `add_channel()` / `remove_channel()`: callable from any thread; internally serialized
+   - Message sending is async (queued to event loop thread)
+   - Callbacks (`on_subscribe`, etc.) run on the event loop thread
+   - `shutdown()` blocks until event loop exits and all pending sends are flushed or dropped
+6. Connection management: client connect/disconnect handling, graceful shutdown
+7. Tests:
+   - Mock WebSocket client connects, receives `serverInfo` with correct fields
+   - `add_channel()` → client sees `advertise` JSON message
+   - Subscribe → send messageData → client receives correct binary frame (verify opcode, channelId, timestamp, payload)
    - Multiple clients with different subscriptions
+   - Graceful shutdown with connected clients
 
 **Official comparison**: `cpp/foxglove/include/foxglove/server.hpp`, `cpp/foxglove/src/server.cpp`
 
-**Milestone**: Run example → open Foxglove Studio → connect to `ws://localhost:8765` → see live data. This is the first "wow" moment.
+**Milestone**: Run example → open Foxglove Studio → connect to `ws://localhost:8765` → Studio shows connected state and receives `serverInfo`. Raw data frames are delivered for subscribed channels. (Note: meaningful visualization requires typed messages from Ch5/Ch8; this chapter proves protocol-level connectivity.)
 
 ---
 
 ### Chapter 5: 消息序列化
 **Tag**: `v0.5-serialization`
 **New files**: `messages.hpp/cpp` (partial), `test_messages.cpp`, `examples/ch05_serialization/`
+
+**Serialization Decision**: This tutorial uses **JSON + JSON Schema** exclusively. All message encodings use `"json"`, and all schema encodings use `"jsonschema"`. This intentionally diverges from the official SDK which uses Protobuf. Foxglove Studio supports both; JSON is chosen for educational clarity. Protobuf support is listed as a reader exercise in Chapter 9.
 
 **Content**:
 1. Base types with JSON serialization:
@@ -320,25 +338,36 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
    - `Vector3 { x, y, z }`
    - `Quaternion { x, y, z, w }`
    - `Pose { position: Vector3, orientation: Quaternion }`
-   - `Color { r, g, b, a }`
+   - `Color { r, g, b, a }` (all fields are `double` in range [0, 1])
 2. JSON Schema generation:
    - Each type has a static `json_schema()` method returning its JSON Schema definition
    - Used for channel advertisement `schema_data` field
+   - Schema names must match Foxglove's canonical names (e.g., `"foxglove.SceneUpdate"`) for Studio compatibility
 3. Serialization interface:
-   - `encode(const T& msg) → std::vector<uint8_t>`
+   - `encode(const T& msg) → std::vector<uint8_t>` (JSON UTF-8 bytes)
    - `decode(const uint8_t* data, size_t len) → FoxgloveResult<T>`
 4. nlohmann_json integration: `to_json`/`from_json` ADL customization points
-5. Tests: roundtrip for every type, edge cases (NaN, infinity, max values), schema validation
+5. JSON edge case policy:
+   - `NaN` and `Infinity`: serialized as `null` (JSON has no NaN/Inf representation)
+   - Field ordering: alphabetical (for deterministic output and golden-file testing)
+   - Floating-point: full precision via `nlohmann::json::number_float_t` (no truncation)
+6. Tests:
+   - Roundtrip for every type: `T → encode → decode → T`, assert equality
+   - Edge cases: NaN fields → null → decoded as 0.0 (with documented lossy behavior)
+   - Golden-file: encode known values → compare against checked-in JSON files
+   - Schema validation: generated JSON Schema is valid JSON Schema Draft-07
 
-**Official comparison**: `cpp/foxglove/include/foxglove/messages.hpp` (auto-generated), `schemas/` proto definitions
+**Official comparison**: `cpp/foxglove/include/foxglove/messages.hpp` (auto-generated from proto), `schemas/` proto definitions
 
-**Milestone**: All base types serialize/deserialize correctly; JSON Schemas match Foxglove specification.
+**Milestone**: All base types serialize/deserialize correctly; golden-file tests pass; JSON Schemas match Foxglove canonical schema names.
 
 ---
 
 ### Chapter 6: Context 与 Sink 路由
 **Tag**: `v0.6-context`
 **New files**: `context.hpp/cpp`, `test_context.cpp`, `examples/ch06_context/`
+
+**Architecture note**: This chapter introduces the `Sink` abstraction and `Context` as a multiplexer. This is a refactoring chapter — `RawChannel`'s `MessageCallback` is now provided by `Context` instead of directly by `WebSocketServer`. The `WebSocketServer` becomes one `Sink` among potentially many.
 
 **Content**:
 1. `Sink` abstract interface:
@@ -347,17 +376,21 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
    - `void on_message(channel_id, data, len, log_time)`
 2. `WebSocketServerSink`: adapter wrapping `WebSocketServer` as a `Sink`
 3. `Context` class:
-   - Binds channels to sinks
+   - Binds channels to sinks — provides a `MessageCallback` that fans out to all registered sinks
    - Default global context (`Context::default_context()`)
-   - `add_sink(unique_ptr<Sink>)` / `remove_sink(sink_id)`
-   - When `RawChannel::log()` is called → Context routes to all registered sinks
-   - Optional: `SinkChannelFilterFn` to selectively route channels to specific sinks
-4. Integration: `RawChannel` now internally calls `context.dispatch(...)` instead of directly pushing to server
-5. Tests: multi-sink routing, channel filter, default context behavior
+   - `add_sink(unique_ptr<Sink>)` → returns `sink_id` / `remove_sink(sink_id)`
+   - `create_channel(topic, encoding, schema)` → creates `RawChannel` wired through this Context
+   - Optional: `SinkChannelFilterFn` — `std::function<bool(sink_id, channel_id)>` to selectively route channels to specific sinks
+4. Concurrency contract:
+   - `add_sink()` / `remove_sink()`: callable from any thread; internally serialized via mutex
+   - `create_channel()`: callable from any thread
+   - Sink callbacks (`on_message`, etc.) are called synchronously from the thread that calls `RawChannel::log()` — sinks must be prepared for concurrent calls
+5. Migration: refactor Ch4's example to use `Context` + `WebSocketServerSink` instead of direct server registration
+6. Tests: multi-sink routing (two mock sinks receive same message), channel filter (sink A gets channel 1 but not 2), default context behavior, add/remove sink lifecycle
 
 **Official comparison**: `cpp/foxglove/include/foxglove/context.hpp`
 
-**Milestone**: Same channel data simultaneously goes to WebSocket server AND (future) MCAP writer.
+**Milestone**: Same channel data simultaneously goes to WebSocket server AND a mock sink. Automated test verifies both sinks receive identical messages.
 
 ---
 
@@ -365,29 +398,42 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
 **Tag**: `v0.7-mcap`
 **New files**: `mcap.hpp/cpp`, `test_mcap.cpp`, `examples/ch07_mcap/`
 **Dependencies introduced**: zstd
+**External tools required**: `mcap` CLI (Go binary, `go install github.com/foxglove/mcap/go/cli/mcap@latest`) — used for verification only
+
+**Architecture note**: This chapter is split into two phases to maintain incremental rhythm. Phase 1 produces valid but uncompressed MCAP files. Phase 2 adds chunking, compression, and indexing.
 
 **Content**:
-1. MCAP binary format specification:
-   - File structure: `Magic → Header → [Data Section] → [Summary Section] → [Summary Offset Section] → Footer → Magic`
-   - Record types: Schema (0x03), Channel (0x04), Message (0x05), Chunk (0x06), ChunkIndex (0x08), Footer (0x02)
-   - CRC32 checksums
+
+**Phase 1 — Minimal MCAP writer** (tag: `v0.7a-mcap-basic`):
+1. MCAP binary format specification (subset):
+   - File structure: `Magic → Header → Schema → Channel → Message* → Footer → Magic`
+   - Record types: Header (0x01), Schema (0x03), Channel (0x04), Message (0x05), Footer (0x02)
+   - CRC32 field left as 0 (no checksum yet)
 2. `McapWriterOptions`:
-   - File path, compression (none/zstd/lz4), chunk size, include CRC
-3. `McapWriter` class:
+   - File path (required)
+3. `McapWriter` class (minimal):
    - `static FoxgloveResult<McapWriter> create(McapWriterOptions)`
-   - Internal buffering: messages accumulate in a chunk, flush when chunk size exceeded
-   - Compression: zstd compress chunk data before writing
-   - Index generation: ChunkIndex records for random access
-   - `close()`: write Summary + Footer, flush all buffers
-4. `McapWriterSink`: adapter wrapping `McapWriter` as a `Sink` for Context integration
-5. Tests:
-   - Write messages → close → read back with official mcap CLI tool (`mcap info`, `mcap cat`)
-   - Verify chunk boundaries, compression, CRC integrity
-   - Empty file edge case
+   - `write_schema(Schema)` / `write_channel(ChannelDescriptor)` / `write_message(channel_id, data, len, log_time)`
+   - `close()`: write Footer, close file
+4. Tests:
+   - Write header + schema + channel + messages + footer → verify with `mcap info` CLI
+   - Golden-file comparison: write known data → compare binary output byte-by-byte against golden artifact
+   - Empty file (header + footer only)
+
+**Phase 2 — Chunking, compression, indexing** (tag: `v0.7b-mcap-full`):
+5. Chunking: messages accumulate in a Chunk record, flush when chunk size exceeded
+6. Compression: zstd compress chunk data before writing
+7. Indexing: ChunkIndex (0x08) records for random access, Statistics record
+8. CRC32 checksums on Header and Footer
+9. `McapWriterSink`: adapter wrapping `McapWriter` as a `Sink` for Context integration
+10. Tests:
+    - Write compressed MCAP → verify readable by `mcap info` and `mcap cat`
+    - Verify chunk boundaries at configured size
+    - Round-trip: write → read back statistics via `mcap info --json` → assert message counts match
 
 **Official comparison**: `cpp/foxglove/include/foxglove/mcap.hpp`, [MCAP spec](https://mcap.dev/spec)
 
-**Milestone**: Generate `.mcap` files that Foxglove Studio can open and play back.
+**Milestone**: Generate `.mcap` files that Foxglove Studio can open and play back. Golden-file tests pass.
 
 ---
 
@@ -412,11 +458,15 @@ static FoxgloveResult<WebSocketServer> create(WebSocketServerOptions options);
    - `ArrowPrimitive { pose, shaft_length, shaft_diameter, head_length, head_diameter, color }`
    - `LinePrimitive { type, pose, thickness, points[], colors[] }`
 4. Discussion: how official SDK auto-generates `messages.hpp` from `schemas/*.proto`
-5. Tests: roundtrip serialization for each complex type, visualization correctness (verified by opening in Studio)
+5. Tests:
+   - Roundtrip serialization for each complex type (encode → decode → compare)
+   - Golden-file JSON comparison for each message type
+   - Integration: publish SceneUpdate via WebSocketServer → scripted WebSocket client receives and validates JSON payload structure
+   - Manual smoke test (not automated): open Foxglove Studio, view 3D panel (documented as a manual step in example README)
 
 **Official comparison**: `cpp/foxglove/include/foxglove/messages.hpp`, `schemas/schemas/foxglove/`
 
-**Milestone**: Publish SceneUpdate with cubes/spheres → visible in Foxglove Studio's 3D panel.
+**Milestone**: All complex message types pass roundtrip + golden-file tests. Scripted WebSocket client validates published message structure matches Foxglove schema.
 
 ---
 
@@ -458,14 +508,14 @@ The `third-party/foxglove-sdk/` directory serves as the authoritative reference 
 
 ### Usage Rules
 
-1. **Read-only**: Never modify files in `third-party/`. It is a git submodule pinned to a specific release tag.
-2. **Explicit comparison**: Every chapter ends with a "vs Official Implementation" section comparing our design to the corresponding official source files.
+1. **Read-only**: Never modify files in `third-party/`. It is a git submodule pinned to a specific commit.
+2. **API & architecture comparison**: Each chapter ends with a "vs Official Implementation" section comparing our public API surface and major architecture choices to the corresponding official source files. Implementation internals (especially Rust async patterns) are noted but not required to match.
 3. **Style extraction**: `.clang-format`, naming conventions, comment style, and test patterns are all derived from the official source.
 4. **Source of truth for protocol**: When implementing Foxglove WebSocket Protocol or MCAP format, cross-reference against official Rust/C implementations, not just documentation.
 
 ### Pinned Version
 
-Pin to the latest stable release tag (e.g., `v0.2.1`) to ensure a stable reference throughout the tutorial.
+Pin to a specific commit on main branch (to be determined at project setup). Record the exact commit SHA in `third-party/foxglove-sdk` submodule. Do not use floating tags.
 
 ---
 
@@ -479,7 +529,11 @@ Pin to the latest stable release tag (e.g., `v0.2.1`) to ensure a stable referen
 | libwebsockets | v4.x | WebSocket server | Chapter 4 |
 | zstd | v1.x | MCAP chunk compression | Chapter 7 |
 
-All managed via CMake FetchContent. No system-level package installation required.
+All managed via CMake FetchContent. No system-level C++ package installation required.
+
+**External tools** (not C++ dependencies, used for verification only):
+- `mcap` CLI (Go binary) — required from Chapter 7 onward for MCAP file verification
+- Foxglove Studio — recommended for manual smoke tests from Chapter 4 onward
 
 ---
 
@@ -491,10 +545,11 @@ Each chapter corresponds to a git tag marking a compilable, testable milestone:
 v0.1-skeleton       → Chapter 1: Project skeleton + error handling + first test
 v0.2-protocol       → Chapter 2: Foxglove protocol encode/decode
 v0.3-channel        → Chapter 3: Channel + Schema abstraction
-v0.4-server         → Chapter 4: WebSocket server (first visual milestone!)
+v0.4-server         → Chapter 4: WebSocket server (first connectivity milestone!)
 v0.5-serialization  → Chapter 5: Message serialization (JSON)
 v0.6-context        → Chapter 6: Context + Sink routing
-v0.7-mcap           → Chapter 7: MCAP file writer
+v0.7a-mcap-basic    → Chapter 7 Phase 1: Minimal MCAP writer (uncompressed)
+v0.7b-mcap-full     → Chapter 7 Phase 2: Chunking + compression + indexing
 v0.8-messages       → Chapter 8: Built-in Foxglove message types
 v0.9-e2e            → Chapter 9: End-to-end integration
 ```
@@ -503,11 +558,76 @@ v0.9-e2e            → Chapter 9: End-to-end integration
 
 ---
 
-## 9. Open Questions
+## 9. Resolved Decisions
 
-1. **Language of tutorial docs**: Chinese (matching muduo book style) or English (wider audience)?
-   - Current assumption: Chinese with English code/comments
-2. **MCAP read support**: Should we implement McapReader for verification, or rely on official `mcap` CLI tool?
-   - Current assumption: Use official CLI tool for verification; writing a reader is out of scope
-3. **Protobuf serialization**: Should Chapter 5 include Protobuf encoding, or JSON-only?
-   - Current assumption: JSON-only in the tutorial for simplicity; Protobuf mentioned as an exercise
+1. **Language of tutorial docs**: Chinese text with English code/comments (matching muduo book style).
+2. **MCAP read support**: Out of scope. Use official `mcap` CLI tool for verification + golden-file binary comparisons.
+3. **Serialization format**: JSON + JSON Schema only. Protobuf is a reader exercise (Chapter 9). This is an intentional divergence from the official SDK for educational clarity.
+4. **Official comparison scope**: Compare public API surface and major architecture choices, not Rust internals.
+5. **Upstream pin**: Exact commit SHA, not floating tag.
+
+---
+
+## 10. Glossary
+
+| Term | Definition |
+|------|-----------|
+| **Middle-level C++ developer** | Comfortable with C++17 features (structured bindings, `std::optional`, `if constexpr`), CMake, and basic networking concepts. Has built at least one non-trivial C++ project. |
+| **Roundtrip test** | `T original → encode(original) → bytes → decode(bytes) → T decoded`, assert `original == decoded` for all fields. |
+| **Golden-file test** | Encode known input → compare output bytes against a checked-in reference file. Detect unintentional serialization changes. |
+| **Sink** | An output destination that receives channel advertisements and message data. Two implementations: WebSocket server (live) and MCAP writer (file). |
+| **Context** | A multiplexer that routes channel data to one or more sinks, with optional per-channel filtering. |
+| **SinkChannelFilterFn** | `std::function<bool(uint32_t sink_id, uint32_t channel_id)>` — returns true if the given sink should receive data from the given channel. |
+
+---
+
+## Appendix A: In-Scope Enums and Constants
+
+### Error Codes (`FoxgloveError`)
+
+| Code | Name | Description |
+|------|------|-------------|
+| 0 | `None` | No error |
+| 1 | `InvalidArgument` | Invalid function argument |
+| 2 | `ChannelClosed` | Attempted to log on a closed channel |
+| 3 | `ServerStartFailed` | WebSocket server failed to start |
+| 4 | `IoError` | File I/O failure (MCAP) |
+| 5 | `SerializationError` | JSON encode/decode failure |
+| 6 | `ProtocolError` | Malformed protocol message |
+
+### Server Capabilities (bitmask)
+
+| Bit | Name | Description |
+|-----|------|-------------|
+| 0x01 | `ClientPublish` | Allow clients to advertise and publish (out of scope — listed for completeness) |
+| 0x02 | `Time` | Server publishes time messages |
+
+(Services, Parameters, ConnectionGraph, Assets, PlaybackControl are out of scope.)
+
+### Supported Encodings
+
+| Encoding | Schema Encoding | Description |
+|----------|----------------|-------------|
+| `"json"` | `"jsonschema"` | JSON messages with JSON Schema — the only encoding in this tutorial |
+
+### Protocol Opcodes (Binary messages)
+
+| Opcode | Direction | Name |
+|--------|-----------|------|
+| 0x01 | S→C | `messageData` |
+| 0x02 | S→C | `time` |
+
+(Client-to-server binary opcodes are out of scope since `ClientPublish` is not implemented.)
+
+---
+
+## Appendix B: Intentional Divergences from Official SDK
+
+| Area | Official SDK | This Tutorial | Why |
+|------|-------------|---------------|-----|
+| Core language | Rust + C FFI + C++ wrapper | Pure C++ | Educational: full control, no Rust toolchain required |
+| Serialization | Protobuf (generated from .proto) | JSON + JSON Schema | Educational: human-readable, no protoc dependency |
+| WebSocket library | Tokio + Tungstenite (Rust) | libwebsockets (C) | Closest C/C++ equivalent; matches official C++ SDK's dependency |
+| Async model | Tokio async runtime | Threaded event loop | C++ standard library has no built-in async runtime |
+| Code generation | Proc macros + build.rs (Rust) | Hand-written message types | Educational: understand what code generators produce |
+| Feature scope | Full (Services, Params, Assets, etc.) | Core subset only | Keeps tutorial focused and achievable |
