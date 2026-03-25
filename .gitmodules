@@ -1,0 +1,3 @@
+[submodule "third-party/foxglove-sdk"]
+	path = third-party/foxglove-sdk
+	url = https://github.com/foxglove/foxglove-sdk.git
