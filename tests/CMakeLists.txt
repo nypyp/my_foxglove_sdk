@@ -9,3 +9,7 @@ add_test(NAME test_protocol COMMAND test_protocol)
 add_executable(test_channel test_channel.cpp)
 target_link_libraries(test_channel PRIVATE foxglove Catch2::Catch2WithMain)
 add_test(NAME test_channel COMMAND test_channel)
+
+add_executable(test_server test_server.cpp)
+target_link_libraries(test_server PRIVATE foxglove Catch2::Catch2WithMain)
+add_test(NAME test_server COMMAND test_server)

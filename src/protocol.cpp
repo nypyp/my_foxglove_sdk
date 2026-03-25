@@ -17,6 +17,10 @@ FoxgloveResult<std::string> encode_server_info(const ServerInfo& info) {
     json["name"] = info.name;
     json["capabilities"] = info.capabilities;
 
+    if (!info.protocol_version.empty()) {
+      json["protocolVersion"] = info.protocol_version;
+    }
+
     if (!info.supported_encodings.empty()) {
       json["supportedEncodings"] = info.supported_encodings;
     }

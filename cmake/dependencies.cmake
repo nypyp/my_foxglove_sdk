@@ -1,5 +1,9 @@
 include(FetchContent)
 
+# Find libwebsockets via pkg-config (system package)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LWS REQUIRED IMPORTED_TARGET libwebsockets)
+
 FetchContent_Declare(
   tl-expected
   GIT_REPOSITORY https://github.com/TartanLlama/expected.git

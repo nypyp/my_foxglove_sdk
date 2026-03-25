@@ -24,6 +24,8 @@ struct ServerInfo {
   std::map<std::string, std::string> metadata;
   /// @brief Optional session ID for connection state management.
   std::string session_id;
+  /// @brief Protocol version string.
+  std::string protocol_version;
 };
 
 /// @brief Channel advertisement for a single channel.
