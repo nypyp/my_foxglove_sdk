@@ -26,3 +26,8 @@ add_test(NAME test_context COMMAND test_context)
 add_executable(test_mcap test_mcap.cpp)
 target_link_libraries(test_mcap PRIVATE foxglove Catch2::Catch2WithMain)
 add_test(NAME test_mcap COMMAND test_mcap)
+
+add_executable(test_messages_ch08 test_messages_ch08.cpp)
+target_link_libraries(test_messages_ch08 PRIVATE foxglove Catch2::Catch2WithMain)
+target_compile_definitions(test_messages_ch08 PRIVATE FOXGLOVE_TEST_GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/golden")
+add_test(NAME test_messages_ch08 COMMAND test_messages_ch08)
