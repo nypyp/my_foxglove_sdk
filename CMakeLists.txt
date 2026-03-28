@@ -15,6 +15,7 @@ add_library(foxglove
   src/server.cpp
   src/messages.cpp
   src/context.cpp
+  src/mcap.cpp
 )
 target_include_directories(foxglove PUBLIC include)
 target_link_libraries(foxglove PUBLIC tl::expected nlohmann_json::nlohmann_json PkgConfig::LWS)
@@ -30,3 +31,4 @@ add_subdirectory(examples/ch03_channel)
 add_subdirectory(examples/ch04_server)
 add_subdirectory(examples/ch05_serialization)
 add_subdirectory(examples/ch06_context)
+add_subdirectory(examples/ch07_mcap)
