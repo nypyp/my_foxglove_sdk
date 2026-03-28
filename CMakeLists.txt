@@ -18,7 +18,13 @@ add_library(foxglove
   src/mcap.cpp
 )
 target_include_directories(foxglove PUBLIC include)
-target_link_libraries(foxglove PUBLIC tl::expected nlohmann_json::nlohmann_json PkgConfig::LWS)
+target_link_libraries(
+  foxglove PUBLIC
+  tl::expected
+  nlohmann_json::nlohmann_json
+  PkgConfig::LWS
+  PkgConfig::ZSTD
+)
 
 # Tests
 enable_testing()

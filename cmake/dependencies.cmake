@@ -3,6 +3,7 @@ include(FetchContent)
 # Find libwebsockets via pkg-config (system package)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(LWS REQUIRED IMPORTED_TARGET libwebsockets)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 
 FetchContent_Declare(
   tl-expected
