@@ -5,3 +5,5 @@ compile_commands.json
 *.mcap
 .sisyphus/
 .worktrees/
+.ruff_cache/
+

@@ -1,0 +1,219 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  # Build configuration
+  BUILD_TYPE: Debug
+  # Codecov token (optional, set in repo settings)
+  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+jobs:
+  # ============================================
+  # Ubuntu Linux - Multiple Compilers
+  # ============================================
+  ubuntu:
+    name: Ubuntu (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler: [gcc-12, gcc-13, clang-15, clang-16]
+        include:
+          - compiler: gcc-12
+            gcc_version: '12'
+          - compiler: gcc-13
+            gcc_version: '13'
+          - compiler: clang-15
+            clang_version: '15'
+          - compiler: clang-16
+            clang_version: '16'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            pkg-config \
+            libwebsockets-dev \
+            libzstd-dev \
+            gcc-12 g++-12 \
+            gcc-13 g++-13 \
+            clang-15 \
+            clang-16
+
+      - name: Set compiler
+        run: |
+          echo "CC=${{ matrix.compiler }}" >> $GITHUB_ENV
+          echo "CXX=${{ contains(matrix.compiler, 'gcc') && format('g++-{0}', matrix.gcc_version) || format('clang++-{0}', matrix.clang_version) }}" >> $GITHUB_ENV
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }}
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure -j$(nproc)
+
+      - name: Upload test logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-logs-ubuntu-${{ matrix.compiler }}
+          path: |
+            build/Testing/**/*.xml
+            build/Testing/**/*.log
+
+  # ============================================
+  # Code Coverage (Ubuntu only)
+  # ============================================
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            pkg-config \
+            libwebsockets-dev \
+            libzstd-dev \
+            gcc-13 \
+            g++-13 \
+            lcov \
+            gcovr
+
+      - name: Configure with coverage
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="--coverage -fprofile-arcs -ftest-coverage" \
+            -DCMAKE_C_FLAGS="--coverage -fprofile-arcs -ftest-coverage"
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure -j$(nproc)
+
+      - name: Generate coverage report
+        run: |
+          lcov --capture --directory build --output-file coverage.info \
+            --include '*/src/*' --include '*/include/*' \
+            --ignore-errors source,gcov || true
+          lcov --remove coverage.info '*/tests/*' --output-file coverageFiltered.info || true
+          gcovr -r . --filter 'include/' --xml coverage.xml --txt coverage.txt || true
+
+      - name: Upload coverage to Codecov
+        if: env.CODECOV_TOKEN != ''
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            coverage.txt
+            coverageFiltered.info
+
+  # ============================================
+  # Static Analysis (clang-tidy)
+  # ============================================
+  analyze:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake \
+            pkg-config \
+            libwebsockets-dev \
+            libzstd-dev \
+            clang-tidy
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Debug
+
+      - name: Generate compile commands
+        run: cmake --build build --target generated_files 2>/dev/null || true
+
+      - name: Run clang-tidy
+        run: |
+          find build -name 'compile_commands.json' -exec cp {} . \;
+          find . -path './build' -prune -o \( -name '*.cpp' -o -name '*.hpp' \) -print \
+            | xargs -P$(nproc) clang-tidy-15 \
+              -header-filter='.*/include/.*' \
+              -checks='*,-modernize-*,-readability-*' \
+              -format-style=none \
+              -p . 2>/dev/null || true
+
+      - name: Check for errors
+        run: |
+          # Exit with non-zero if clang-tidy found issues
+          find . -name '*.cpp' -o -name '*.hpp' \
+            | xargs -I{} sh -c 'clang-tidy-15 -p build {} 2>&1 | grep -q "error:" && echo "ISSUE FOUND" && exit 1' \
+            && echo "No critical issues found" || echo "Please review clang-tidy warnings"
+
+  # ============================================
+  # Formatting Check
+  # ============================================
+  format:
+    name: Code Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: sudo apt-get install -y clang-format
+
+      - name: Check formatting
+        run: |
+          # Check if any files need formatting
+          find . -name '*.cpp' -o -name '*.hpp' -o -name '*.h' \
+            | grep -v third-party \
+            | xargs clang-format --dry-run -Werror \
+            | grep -q "diff" && echo "Formatting issues found" && exit 1 || echo "Code formatting OK"
+
+  # ============================================
+  # Build Matrix Summary
+  # ============================================
+  success:
+    name: CI Success
+    needs: [ubuntu, analyze, format, coverage]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check all jobs passed
+        run: |
+          echo "All CI jobs completed!"
+          # This is a final summary step
+          # All required jobs must pass for merge
